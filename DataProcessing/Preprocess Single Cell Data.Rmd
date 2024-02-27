@@ -1,0 +1,1014 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+# detach("package:Seurat", unload=TRUE)
+# remotes::install_version("SeuratObject", "4.1.4", repos = c("https://satijalab.r-universe.dev", getOption("repos")))
+# remotes::install_version("Seurat", "4.4.0", repos = c("https://satijalab.r-universe.dev", getOption("repos")))
+# remotes::install_github("mojaveazure/seurat-disk")
+```
+
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+library(hdf5r)
+library(dplyr)
+library(rlang)
+library(Matrix)
+library(harmony)
+library(ggplot2)
+```
+
+## Load Raw Data
+### Stroke single-cell
+```{r}
+# Load Stroke Data
+## Single cell - ischemic and hemorrhagic strokes
+stroke<-Read10X("./Data/GSE167593/")
+stroke<-CreateSeuratObject(stroke, assay = "RNA", project = "stroke")
+
+stroke$"study" <- "stroke"
+stroke$"condition"<-"sc_HS" # hemorrhagic stroke
+stroke@meta.data[colnames(stroke)[grep("-1",colnames(stroke))],"condition"]<-"sc_Control" # wild type
+
+stroke@meta.data[colnames(stroke)[grep("-2",colnames(stroke))],"condition"]<-"sc_IS" # ischemic stroke
+```
+
+### AD snigle-nucleus
+```{r}
+# Load Alzheimer’s data
+## Single nucleus 
+wt_control<-Read10X("./Data/GSE140399/WT_cor/") # wild type
+wt_control<-CreateSeuratObject(wt_control, assay = "RNA", project = "AD")
+wt_control$"study" <- "AD" 
+wt_control$"condition"<-"sn_Control"
+
+wt_AD<-Read10X("./Data/GSE140399/WT_5XFAD/") # Alzheimer
+wt_AD<-CreateSeuratObject(wt_AD, assay = "RNA", project = "AD")
+wt_AD$"study" <- "AD" 
+wt_AD$"condition"<-"sn_Alzheimer"
+```
+
+### Review data
+```{r}
+stroke <- RenameCells(stroke, add.cell.id = "stroke")
+wt_control <- RenameCells(wt_control, add.cell.id = "sc_control") # wt_sn
+wt_AD <- RenameCells(wt_AD, add.cell.id = "sc_AD") # ad_cor
+```
+
+```{r}
+AD <- merge(x = wt_control,
+		       y = wt_AD,
+		       merge.data = TRUE)
+```
+
+
+```{r}
+rna_counts <- stroke@meta.data$nCount_RNA
+
+# Plot the histogram
+hist(rna_counts, breaks = 50, main = "Stroke (sc) of RNA counts", xlab = "RNA counts", ylab = "Frequency", col = "blue")
+
+# Log-transform the counts
+hist(log1p(rna_counts), breaks = 50, main = "Stroke (sc) of log-transformed RNA counts", xlab = "log-transformed RNA counts", ylab = "Frequency", col = "blue")
+```
+
+```{r}
+rna_counts <- AD@meta.data$nCount_RNA
+
+# Plot the histogram
+hist(rna_counts, breaks = 50, main = "Control AD (sn) of RNA counts", xlab = "RNA counts", ylab = "Frequency", col = "blue")
+
+# Log-transform the counts
+hist(log1p(rna_counts), breaks = 50, main = "Control AD (sn) of log-transformed RNA counts", xlab = "log-transformed RNA counts", ylab = "Frequency", col = "blue")
+```
+
+```{r}
+stroke_original <- stroke
+AD_original <- AD
+```
+
+```{r}
+# Extract nFeature_RNA and create a data frame with an identifying column
+stroke_data <- data.frame(nFeature_RNA = stroke$nFeature_RNA, data_type = 'Stroke')
+AD_data <- data.frame(nFeature_RNA = AD$nFeature_RNA, data_type = 'AD')
+
+# Combine the data frames into one
+combined_data <- rbind(stroke_data, AD_data)
+
+ggplot(combined_data, aes(x=data_type, y=nFeature_RNA, fill=data_type)) +
+  geom_violin(trim=FALSE) +  # Draw the violin plots
+  geom_boxplot(width=0.1, fill="white", outlier.shape = NA) +  # Add inner box plot to summarize the data
+  scale_fill_brewer(palette="Pastel1") +  
+  labs(x="Group", y="Number of Features (RNA)") +  # Label the axes
+  theme_minimal()  
+```
+
+
+```{r}
+dim(stroke_original)
+selected_c<-WhichCells(stroke_original, expression = nFeature_RNA>300 & nFeature_RNA<4000)
+selected_f<-rownames(stroke_original)[Matrix::rowSums(stroke_original@assays$RNA@counts>0)>5]
+# selected_f <- rownames(stroke_original)[Matrix::rowSums(GetAssayData(stroke_original, assay = "RNA", slot = "counts")) > 5]
+stroke<-subset(stroke_original, features=selected_f, cells=selected_c)
+dim(stroke)
+```
+
+
+```{r}
+dim(AD_original)
+selected_c<-WhichCells(AD_original, expression = nFeature_RNA>300 & nFeature_RNA<1800)
+# selected_f <- rownames(stroke_original)[Matrix::rowSums(GetAssayData(wt_AD, assay = "RNA", slot = "counts")) > 5]
+selected_f<-rownames(AD_original)[Matrix::rowSums(AD_original@assays$RNA@counts>0)>5]
+AD<-subset(AD_original, features=selected_f, cells=selected_c)
+dim(AD)
+```
+
+```{r}
+# Extract nFeature_RNA and create a data frame with an identifying column
+stroke_data <- data.frame(nFeature_RNA = stroke$nFeature_RNA, data_type = 'Stroke')
+AD_data <- data.frame(nFeature_RNA = AD$nFeature_RNA, data_type = 'AD')
+
+# Combine the data frames into one
+combined_data <- rbind(stroke_data, AD_data)
+
+ggplot(combined_data, aes(x=data_type, y=nFeature_RNA, fill=data_type)) +
+  geom_violin(trim=FALSE) +  # Draw the violin plots
+  geom_boxplot(width=0.1, fill="white", outlier.shape = NA) +  
+  scale_fill_brewer(palette="Pastel1") +  
+  labs(x="Group", y="Number of Features (RNA)") +  
+  theme_minimal()  
+```
+
+## Mege Data
+```{r}
+rows_stoke <- rownames(stroke)
+rows_AD <- rownames(AD)
+```
+
+```{r}
+library(ggvenn)
+
+list_of_vectors <- list(
+  Stroke = rows_stoke,
+  AD = rows_AD
+)
+
+ggvenn(list_of_vectors, c("Stroke", "AD"))
+```
+
+
+```{r}
+# Merge raw samples
+merged_seurat <- merge(x = stroke,
+            		       y = AD,
+            		       merge.data = TRUE)
+```
+
+```{r}
+dim(merged_seurat)
+```
+
+
+```{r}
+head(rownames(merged_seurat[["RNA"]]))
+```
+
+```{r}
+gene_names <- rownames(merged_seurat[["RNA"]])
+
+# Filter gene names: no leading numbers and no parentheses
+valid_gene_names <- gene_names[!grepl("^\\d|\\(|\\)", gene_names)]
+# valid_gene_names <- gene_names[!grepl("^\\d|\\(|\\)|\\d{3,}", gene_names)] # extra filtering change for merged_seurat3_v2.RData 
+```
+
+```{r}
+print(length(gene_names))
+print(length(valid_gene_names))
+```
+
+```{r}
+# Filter the Seurat object to keep only valid genes
+merged_seurat <- subset(merged_seurat, features = valid_gene_names)
+```
+
+```{r}
+# store mitochondrial percentage in object meta data
+merged_seurat <- PercentageFeatureSet(merged_seurat, pattern = "^MT-", col.name = "percent.mt")
+
+table(merged_seurat@meta.data[["percent.mt"]])
+```
+
+```{r}
+rna_counts <- merged_seurat@meta.data$nCount_RNA
+
+# Plot the histogram
+hist(rna_counts, breaks = 50, main = "Histogram of RNA counts", xlab = "RNA counts", ylab = "Frequency", col = "blue")
+
+# Log-transform the counts
+hist(log1p(rna_counts), breaks = 50, main = "Histogram of log-transformed RNA counts", xlab = "log-transformed RNA counts", ylab = "Frequency", col = "blue")
+```
+
+## Normalise Data
+```{r}
+rm(AD)
+rm(AD_original)
+rm(AD_data)
+
+rm(stroke)
+rm(stroke_data)
+rm(stroke_original)
+
+gc()
+```
+
+```{r}
+# merged_seurat <- NormalizeData(merged_seurat, verbose = F)
+# all_genes <- rownames(merged_seurat)
+# merged_seurat <- FindVariableFeatures(merged_seurat, selection.method = "vst", nfeatures = 2000, verbose = F)
+# merged_seurat <- ScaleData(merged_seurat, features = all_genes, verbose = F)
+merged_seurat <- SCTransform(merged_seurat, verbose = F)
+merged_seurat <- RunPCA(merged_seurat, features = VariableFeatures(object = merged_seurat), verbose = F)
+```
+
+```{r}
+data_matrix <- GetAssayData(merged_seurat, assay = "RNA", slot = "data")
+counts_matrix <- GetAssayData(merged_seurat, assay = "RNA", slot = "counts")
+
+# Calculate the range of values
+counts_min_value <- min(counts_matrix)
+counts_max_value <- max(counts_matrix)
+
+data_min_value <- min(data_matrix)
+data_max_value <- max(data_matrix)
+
+# Print the range
+cat("The range of RNA data is:", data_min_value, "to", data_max_value, "\n")
+cat("The range of RNA counts is:", counts_min_value, "to", counts_max_value, "\n")
+```
+
+```{r}
+data_matrix <- GetAssayData(merged_seurat, assay = "SCT", slot = "data")
+data.scaled_matrix <- GetAssayData(merged_seurat, assay = "SCT", slot = "scale.data")
+counts_matrix <- GetAssayData(merged_seurat, assay = "SCT", slot = "counts")
+
+# Calculate the range of values
+counts_min_value <- min(counts_matrix)
+counts_max_value <- max(counts_matrix)
+
+data_min_value <- min(data_matrix)
+data_max_value <- max(data_matrix)
+
+data.scaled_min_value <- min(data.scaled_matrix)
+data.scaled_max_value <- max(data.scaled_matrix)
+
+# Print the range
+cat("The range of SCT data is:", data_min_value, "to", data_max_value, "\n")
+cat("The range of SCT data.scaled is:", data.scaled_min_value, "to", data.scaled_max_value, "\n")
+cat("The range of SCT counts is:", counts_min_value, "to", counts_max_value, "\n")
+```
+
+```{r}
+save(merged_seurat, file = "./Saved/merged_seurat1.RData")
+# load("./Saved/merged_seurat1.RData")
+```
+
+```{r}
+merged_seurat <- RunHarmony(merged_seurat, 
+				group.by.vars = c("study"), 
+				reduction = "pca", assay.use = "SCT", reduction.save = "harmony")
+```
+
+```{r}
+merged_seurat <- FindNeighbors(object = merged_seurat, reduction = "harmony")
+merged_seurat <- FindClusters(merged_seurat, resolution = c(0.4))
+```
+
+```{r}
+merged_seurat <- RunUMAP(merged_seurat, reduction = "harmony", assay = "SCT", dims = 1:30)
+```
+
+```{r}
+DimPlot(merged_seurat, reduction = "umap", group.by = "study")
+```
+```{r}
+p <- DimPlot(merged_seurat, reduction = "umap", group.by = "condition")
+
+p + scale_color_manual(values = c("red", "orange", "yellow", "purple", "blue"), 
+                       labels =  c("sc-Stroke HS", "sc-Stroke IS", "sn-Alzheimer", "sn-Control", "sc-Control")) # Adjust the values and labels as necessary
+
+```
+
+```{r}
+counts <- merged_seurat$nCount_SCT
+# Plot the histogram
+hist(counts, breaks = 50, main = "Histogram of RNA counts", xlab = "RNA counts", ylab = "Frequency", col = "blue")
+
+# Log-transform the counts
+hist(log1p(counts), breaks = 50, main = "Histogram of log-transformed RNA counts", xlab = "log-transformed RNA counts", ylab = "Frequency", col = "blue")
+```
+
+```{r}
+# save(merged_seurat, file = "./Saved/merged_seurat2.RData")
+# load("./Saved/merged_seurat2.RData")
+```
+
+## Annotate Cells
+```{r}
+neuronal_cell_types_dict = list(
+  "Astrocyte"= c("Aqp4", "Gja1"),
+  "Endothelial_cell"= c("Cldn5", "Flt1"),
+  "Excitatory_neurons"= c("Cck", "Camk2a", "Atp1a1"),
+  "Microglia"= c("P2ry12", "Tmem119"),
+  "Neuroblast"= "Dcx", 
+  "Neutrophil"= "S100a8", 
+  "Oligodendrocyte"= c("Mbp", "Plp1"),
+  "OPCs"= c("Pdgfra", "Vcan"),
+  "T_cells"= "Cd3e"  
+)
+```
+
+```{r}
+dim(merged_seurat)
+```
+
+```{r}
+merged_seurat@meta.data
+```
+
+```{r}
+for (cell_type in names(neuronal_cell_types_dict)) {
+  genes <- neuronal_cell_types_dict[[cell_type]]
+  merged_seurat <- AddModuleScore(object = merged_seurat, features = list(genes), 
+                                  nbin = 100,
+                                  control = 100,
+                                  name = paste("score",cell_type))
+}
+scores <- merged_seurat@meta.data[,grepl("score", names(merged_seurat@meta.data))]
+merged_seurat$predicted_cell_type <- apply(scores, 1, function(x) names(neuronal_cell_types_dict)[which.max(x)])
+```
+
+```{r}
+DimPlot(merged_seurat, reduction = "umap", group.by = "predicted_cell_type")
+```
+
+```{r}
+# Calculate the percentage of each cell type within each condition
+cell_type_percentages <- merged_seurat@meta.data %>%
+  group_by(condition, predicted_cell_type) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  group_by(condition) %>%
+  mutate(total = sum(count),
+         percent = (count / total) * 100) %>%
+  ungroup()
+
+# Create the stacked bar plot with ggplot2
+ggplot(cell_type_percentages, aes(x = condition, y = percent, fill = predicted_cell_type)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal() +
+  labs(x = "Condition",
+       y = "Percentage of cells (%)",
+       fill = "Cell Type") +
+  coord_flip() # Flip coordinates to match the horizontal layout of your example
+```
+
+
+```{r}
+# save(merged_seurat, file = "./Saved/merged_seurat3_v3.RData")
+# load("./Saved/merged_seurat3_v3.RData")
+```
+
+```{r}
+# SaveH5Seurat(merged_seurat, filename = './merged_seurat.h5Seurat')
+```
+
+```{r}
+# Convert("merged_seurat.h5Seurat", dest = "h5ad")
+```
+
+```{r}
+# rm(merged_seurat)
+# rm(merged_seurat_f)
+```
+
+## Export counts matrics for further processing
+```{r}
+humGenes <- rownames(merged_seurat)
+head(humGenes)
+```
+
+```{r}
+# Remove gene names starting with a number or containing parentheses
+filtered_humGenes <- humGenes[!grepl("^\\d|\\(|\\)", humGenes)]
+# filtered_humGenes <- humGenes[!grepl("^\\d|\\(|\\)|\\d{3,}", humGenes)]
+
+# Display the first few entries of the filtered list
+head(filtered_humGenes)
+```
+
+```{r}
+print(length(humGenes))
+print(length(filtered_humGenes))
+```
+
+```{r}
+# Filter the Seurat object to keep only valid genes
+print(dim(merged_seurat))
+merged_seurat <- subset(merged_seurat, features = filtered_humGenes)
+print(dim(merged_seurat))
+```
+
+```{r}
+seurat_stroke <- subset(merged_seurat, subset = study == "stroke")
+seurat_AD <- subset(merged_seurat, subset = study == "AD")
+```
+
+```{r}
+counts_stroke <- GetAssayData(seurat_stroke , assay = "SCT", slot = "data")
+counts_AD <- GetAssayData(seurat_AD , assay = "SCT", slot = "data")
+```
+
+```{r}
+# Convert to a data frame or matrix for writing to CSV
+counts_stroke_df <- as.data.frame(as.matrix(counts_stroke))
+
+# Save to CSV
+# write.csv(counts_stroke_df, file = "counts_stroke.csv")
+```
+
+
+```{r}
+# Convert to a data frame or matrix for writing to CSV
+counts_AD_df <- as.data.frame(as.matrix(counts_AD))
+
+# Save to CSV
+# write.csv(counts_AD_df, file = "counts_AD.csv")
+```
+
+```{r}
+rm(counts_AD)
+rm(counts_AD_df)
+
+rm(counts_matrix)
+rm(seurat_AD)
+rm(seurat_stroke)
+
+rm(counts_stroke)
+rm(counts_stroke_df)
+
+rm(wt_AD)
+rm(wt_control)
+
+rm(data_matrix)
+rm(data.scaled_matrix)
+
+gc()
+```
+
+
+## Integrate flux data
+```{r}
+AD_flux_data <- read.csv('./input/AD_flux.csv', row.names = 1)
+Stroke_flux_data <- read.csv('./input/Stroke_flux.csv', row.names = 1)
+```
+
+```{r}
+dim(AD_flux_data)
+dim(Stroke_flux_data)
+```
+
+```{r}
+combined_flux_data <- rbind(AD_flux_data, Stroke_flux_data)
+```
+
+```{r}
+dim(combined_flux_data)
+```
+
+```{r}
+# If your flux data frame (flux_data_filtered) has cells as columns, transpose it
+combined_flux_data_t <- t(combined_flux_data)
+
+# Convert it back to a data frame, as t() returns a matrix
+combined_flux_data_t_df <- as.data.frame(combined_flux_data_t)
+
+# Ensure row names are cell identifiers, which might already be the case
+rownames(combined_flux_data_t_df) <- colnames(combined_flux_data)
+```
+
+```{r}
+# Get cell identifiers from the Seurat object
+seurat_cell_ids <- colnames(merged_seurat)
+```
+
+```{r}
+# # Original column names
+# colnames(combined_flux_data_t_df) <- gsub("wt_sn_", "WT_control_", colnames(combined_flux_data_t_df))
+# colnames(combined_flux_data_t_df) <- gsub("ad_cor_", "WT_AD_", colnames(combined_flux_data_t_df))
+# 
+# # Check the modified column names
+# head(colnames(combined_flux_data_t_df))
+```
+
+```{r}
+# Get cell identifiers from the flux data frame (assuming row names are set to cell identifiers)
+flux_cell_ids <- colnames(combined_flux_data_t_df)
+```
+
+
+```{r}
+cells_to_keep <- intersect(seurat_cell_ids, flux_cell_ids)
+```
+
+```{r}
+merged_seurat_f <- subset(merged_seurat, cells = cells_to_keep)
+dim(merged_seurat_f)
+```
+
+```{r}
+# Subset the flux data frame to include only the cells present in the filtered Seurat object
+combined_flux_data_t_df <- combined_flux_data_t_df[,cells_to_keep]
+dim(combined_flux_data_t_df)
+```
+
+```{r}
+# Check if all cell identifiers in Seurat object exist in the corrected flux data
+all(colnames(merged_seurat_f) %in% colnames(combined_flux_data_t_df))
+```
+
+```{r}
+merged_seurat_f <- AddMetaData(object = merged_seurat_f, metadata = t(combined_flux_data_t_df))
+```
+
+```{r}
+VlnPlot(merged_seurat_f, features = "M_1", group.by = "condition", pt.size = 0.0)
+```
+
+```{r}
+VlnPlot(merged_seurat_f, features = c("M_146", "M_89", "M_93"), group.by = "condition", pt.size = 0.1)
+```
+
+```{r}
+# Splitting the visualization by condition for "M_1"
+FeaturePlot(merged_seurat_f, features = "M_5", split.by = "condition")
+```
+
+```{r}
+merged_seurat_f$metacell_group <- paste0(
+  as.character(merged_seurat_f$predicted_cell_type), '_',
+  as.character(merged_seurat_f$condition)
+)
+```
+
+```{r}
+library(pheatmap)
+library(tidyr)
+
+# Extract the data for the heatmap
+metadata <- merged_seurat_f@meta.data
+modules_data <- metadata[, grepl("M_", names(metadata))]
+
+cell_type_conditions <- metadata$metacell_group 
+
+# Create a data frame that will hold the cell type conditions and their corresponding data
+heatmap_data <- cbind(cell_type_conditions, modules_data)
+
+# heatmap_data$cell_type_conditions <- factor(heatmap_data$cell_type_conditions, levels = unique(heatmap_data$cell_type_conditions))
+
+heatmap_data_long <- reshape2::melt(heatmap_data, id.vars = "cell_type_conditions")
+
+# Aggregate the data by cell type condition and variable (module)
+heatmap_data_agg <- heatmap_data_long %>%
+  group_by(cell_type_conditions, variable) %>%
+  summarise(value = mean(value, na.rm = TRUE)) %>%
+  spread(key = variable, value = value)
+
+# Drop the cell type conditions column for heatmap plotting
+heatmap_data_for_pheatmap <- as.matrix(heatmap_data_agg[, -1])
+
+rownames(heatmap_data_for_pheatmap) <- heatmap_data_agg$cell_type_conditions
+```
+
+```{r}
+hist(merged_seurat_f@meta.data$M_126)
+```
+```{r}
+heatmap_data_for_pheatmap <- t(heatmap_data_for_pheatmap)
+```
+
+
+```{r}
+library(RColorBrewer)
+color_palette <- colorRampPalette(c("white", "red"))(100)
+# color_palette <- colorRampPalette(brewer.pal(11, "RdBu"))(100)
+
+heatmap_data_for_pheatmap_sorted <- heatmap_data_for_pheatmap[, order(colnames(heatmap_data_for_pheatmap))]
+
+png("plot2.png", width = 20, height = 40, units = "in", res = 200)
+pheatmap(heatmap_data_for_pheatmap_sorted,
+         color = color_palette,
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,  
+         show_rownames = TRUE,
+         show_colnames = TRUE)
+dev.off()
+```
+
+
+```{r}
+modules_to_highlight <- c("M_79", "M_89", "M_93", "M_100", "M_103", "M_126", "M_137", "M_144", "M_146")
+
+# Create an annotation data frame
+row_annotation <- data.frame(
+  Highlight = ifelse(rownames(heatmap_data_for_pheatmap_sorted) %in% modules_to_highlight, "Highlight", "Normal")
+)
+
+# Ensure rownames match for proper alignment
+rownames(row_annotation) <- rownames(heatmap_data_for_pheatmap_sorted)
+
+```
+
+```{r}
+pheatmap(heatmap_data_for_pheatmap_sorted,
+         annotation_row = row_annotation,
+         color = color_palette,  
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         cluster_cols = FALSE,
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete")
+```
+```{r}
+annotation_colors = list(
+  Highlight = c(Highlight = "red", Normal = "white")
+)
+
+png("plot3.png", width = 20, height = 40, units = "in", res = 200)
+# Update the pheatmap call with the annotation colors
+pheatmap(heatmap_data_for_pheatmap_sorted,
+         annotation_row = row_annotation,
+         annotation_colors = annotation_colors,
+         cluster_cols = FALSE,
+         color = color_palette, 
+         show_rownames = TRUE,
+         show_colnames = TRUE)
+dev.off()
+```
+
+
+## WGCNA original
+
+### Subselect only endothelial
+```{r}
+print(unique(merged_seurat$predicted_cell_type))
+only_endothelial <- subset(merged_seurat, subset = predicted_cell_type=="Endothelial_cell")  
+dim(only_endothelial)
+```
+
+```{r}
+# rm(merged_seurat)
+rm(seurat_stroke)
+rm(seurat_AD)
+gc()
+```
+
+```{r}
+# save(only_endothelial, file = "./Saved/only_endothelial.RData")
+```
+
+```{r}
+load("./Saved/only_endothelial.RData")
+```
+
+```{r}
+only_endothelial@assays$RNA@data <- only_endothelial@assays$SCT@data
+```
+
+### Code based on paper
+```{r}
+source("./constructMetaCells.R")
+```
+
+```{r}
+# print(unique(merged_seurat$predicted_cell_type))
+# merged_seurat <- subset(merged_seurat, subset = predicted_cell_type=="Endothelial_cell")  
+# dim(merged_seurat)
+```
+
+
+```{r}
+merged_seurat@assays$RNA@data <- merged_seurat@assays$SCT@data
+```
+
+```{r}
+merged_seurat$metacell_group <- paste0(
+  as.character(merged_seurat$predicted_cell_type), '_',
+  as.character(merged_seurat$condition)
+)
+```
+
+```{r}
+genes.keep<-VariableFeatures(merged_seurat)
+```
+
+```{r}
+groups <- unique(merged_seurat$metacell_group)
+```
+
+```{r}
+for(group in groups){
+  print(sum(merged_seurat$metacell_group == group))
+}
+```
+
+
+```{r}
+groups_to_remove <- c()
+for(group in groups){
+  if (sum(merged_seurat$metacell_group == group) < 100){
+    groups_to_remove <- c(groups_to_remove, group)
+  }
+}
+groups <- setdiff(groups, groups_to_remove)
+```
+
+
+```{r}
+seurat_list <- list()
+for(group in groups){
+  print(group)
+  cur_seurat <- subset(merged_seurat, metacell_group == group)
+  cur_seurat <- cur_seurat[genes.keep,]
+  cur_metacell_seurat <- construct_metacells(
+    cur_seurat, name=group,
+    k=50, reduction='umap',
+    assay='RNA', slot='data'
+  )
+  cur_metacell_seurat$condition <- as.character(unique(cur_seurat$condition))
+  cur_metacell_seurat$predicted_cell_type <- as.character(unique(cur_seurat$predicted_cell_type))
+  seurat_list[[group]] <- cur_metacell_seurat
+}
+```
+
+```{r}
+save(seurat_list, file = "./Saved/seurat_list.RData")
+```
+
+```{r}
+load("./Saved/seurat_list.RData")
+```
+
+```{r}
+metacell_seurat <- merge(seurat_list[[1]], seurat_list[2:length(seurat_list)])
+
+metacell_seurat <- ScaleData(metacell_seurat, features = rownames(metacell_seurat))
+metacell_seurat <- RunPCA(metacell_seurat, features=rownames(metacell_seurat))
+metacell_seurat <- RunHarmony(metacell_seurat, group.by='orig.ident', dims=1:15,project.dim = F)
+metacell_seurat <- RunUMAP(metacell_seurat, reduction='harmony', dims=1:15)
+```
+
+```{r}
+DimPlot(metacell_seurat, group.by='predicted_cell_type', reduction='umap', label=TRUE)
+```
+```{r}
+library(tidyverse)
+library(WGCNA)
+enableWGCNAThreads(nThreads = 8)
+
+# how many groups are there
+# nclusters <- length(unique(metacell_seurat$predicted_cell_type))
+genes.use <- rownames(metacell_seurat)
+# targets <- metacell_seurat@meta.data
+# group <- as.factor(metacell_seurat$condition)
+
+# format the expression matrix for WGCNA
+datExpr <- as.data.frame(GetAssayData(metacell_seurat, assay='RNA', slot='data')[genes.use,])
+datExpr <- as.data.frame(t(datExpr))
+
+# only keep good genes:
+datExpr <- datExpr[,goodGenes(datExpr)]
+
+# Choose a set of soft-thresholding powers
+powers = c(seq(1,10,by=1), seq(12,30, by=2))
+
+# Call the network topology analysis function for each set in turn
+powerTable = list(
+  data = pickSoftThreshold(
+    datExpr,
+    powerVector=powers,
+    verbose = 100,
+    networkType="signed",
+    corFnc="bicor"
+  )[[2]]
+)
+
+
+# Plot the results:
+pdf("./1_Power.pdf", height=10, width=18)
+
+colors = c("blue", "red","black")
+# Will plot these columns of the returned scale free analysis tables
+plotCols = c(2,5,6,7)
+colNames = c("Scale Free Topology Model Fit", "Mean connectivity", "mean connectivity",
+             "Max connectivity");
+
+# Get the minima and maxima of the plotted points
+ylim = matrix(NA, nrow = 2, ncol = 4);
+for (col in 1:length(plotCols)){
+  ylim[1, col] = min(ylim[1, col], powerTable$data[, plotCols[col]], na.rm = TRUE)
+  ylim[2, col] = max(ylim[2, col], powerTable$data[, plotCols[col]], na.rm = TRUE)
+}
+
+# Plot the quantities in the chosen columns vs. the soft thresholding power
+par(mfcol = c(2,2))
+par(mar = c(4.2, 4.2 , 2.2, 0.5))
+cex1 = 0.7
+
+for (col in 1:length(plotCols)){
+  plot(powerTable$data[,1], -sign(powerTable$data[,3])*powerTable$data[,2],
+       xlab="Soft Threshold (power)",ylab=colNames[col],type="n", ylim = ylim[, col],
+       main = colNames[col])
+  addGrid()
+  
+  if (col==1){
+    text(powerTable$data[,1], -sign(powerTable$data[,3])*powerTable$data[,2],
+         labels=powers,cex=cex1,col=colors[1])
+  } else
+    text(powerTable$data[,1], powerTable$data[,plotCols[col]],
+         labels=powers,cex=cex1,col=colors[1])
+  if (col==1){
+    legend("bottomright", legend = 'Metacells', col = colors, pch = 20) 
+  } else
+    legend("topright", legend = 'Metacells', col = colors, pch = 20) 
+}
+dev.off()
+```
+
+```{r}
+softPower=6
+
+multiExpr <- list()
+multiExpr[['ODC']] <- list(data=datExpr)
+
+checkSets(multiExpr) 
+
+# construct network
+net=blockwiseConsensusModules(multiExpr, blocks = NULL,
+                              maxBlockSize = 30000, ## This should be set to a smaller size if the user has limited RAM
+                              randomSeed = 12345,
+                              corType = "pearson",
+                              power = softPower,
+                              consensusQuantile = 0.3,
+                              networkType = "signed",
+                              TOMType = "unsigned",
+                              TOMDenom = "min",
+                              scaleTOMs = TRUE, scaleQuantile = 0.8,
+                              sampleForScaling = TRUE, sampleForScalingFactor = 1000,
+                              useDiskCache = TRUE, chunkSize = NULL,
+                              deepSplit = 4,
+                              pamStage=FALSE,
+                              detectCutHeight = 0.995, minModuleSize = 50,
+                              mergeCutHeight = 0.2,
+                              saveConsensusTOMs = TRUE,
+                              consensusTOMFilePattern = "ConsensusTOM-block.%b.rda")
+
+
+
+consMEs = net$multiMEs
+
+moduleLabels = net$colors
+moduleColors = as.character(moduleLabels)
+consTree = net$dendrograms[[1]]
+
+# module eigengenes
+MEs=moduleEigengenes(multiExpr[[1]]$data, colors = moduleColors, nPC=1)$eigengenes
+MEs=orderMEs(MEs)
+meInfo<-data.frame(rownames(datExpr), MEs)
+colnames(meInfo)[1]= "SampleID"
+
+# intramodular connectivity
+KMEs<-signedKME(datExpr, MEs,outputColumnName = "kME",corFnc = "bicor")
+
+# compile into a module metadata table
+geneInfo=as.data.frame(cbind(colnames(datExpr),moduleColors, KMEs))
+
+nmodules <- length(unique(moduleColors))
+
+# merged gene symbol column
+colnames(geneInfo)[1]= "GeneSymbol"
+colnames(geneInfo)[2]= "Initially.Assigned.Module.Color"
+
+plotDendroAndColors(consTree, moduleColors, "Module colors", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05,
+                    main = paste0("ODC lineage gene dendrogram and module colors"))
+```
+
+```{r}
+length(moduleColors)
+length(colnames(datExpr))
+```
+
+
+```{r}
+genes <- colnames(datExpr)
+geneModuleMembership <- data.frame(gene = genes, module = moduleColors)
+```
+
+```{r}
+enzymes <- c("Slc6a6", "Slc2a1", "Slc7a1", "Slc38a5") 
+enzymeModules <- geneModuleMembership[geneModuleMembership$gene %in% enzymes, ]
+```
+
+```{r}
+enzymeModules
+```
+
+
+```{r}
+sampleTraits <- metacell_seurat$condition
+eigengeneTraits <- data.frame(MEs, sampleTraits)
+eigengeneTraits <- t(eigengeneTraits)
+```
+
+```{r}
+library(reshape2)
+
+# Recreate the eigengeneTraits data frame
+eigengeneTraits <- data.frame(MEs, sampleTraits = sampleTraits)
+
+# Melt the data frame for plotting with ggplot2
+# The id.vars should match your condition column name, and you can specify the variable name and value name
+meltedData <- melt(eigengeneTraits, id.vars = "sampleTraits", variable.name = "Module", value.name = "EigengeneExpression")
+
+# Now the column names should be "sampleTraits", "Module", and "EigengeneExpression"
+print(names(meltedData))
+```
+
+```{r}
+# Use the updated column names for plotting
+p <- ggplot(meltedData, aes(x = Module, y = EigengeneExpression, fill = sampleTraits)) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_cartesian(ylim = c(-0.01, 0.021)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Module", y = "Module Eigengene") +
+  scale_fill_brewer(palette = "Set1")
+
+# Print the plot
+print(p)
+```
+
+```{r}
+geneModuleMembershipBrown <- geneModuleMembership[geneModuleMembership$module == "brown", ]
+```
+
+```{r}
+geneVector <- as.vector(geneModuleMembershipBrown$gene)
+
+merged_seurat <- AddModuleScore(
+  object = merged_seurat,
+  features = list(geneVector),
+  ctrl = 24,
+  bin = 100,
+  name = 'Score_BrownModule'
+)
+```
+
+```{r}
+metadata_df <- as.data.frame(merged_seurat@meta.data[, c("condition", "Score_BrownModule1")])
+
+library(ggplot2)
+
+ggplot(metadata_df, aes(x = condition, y = Score_BrownModule1)) +
+  geom_boxplot() +
+  coord_cartesian() +
+  theme_minimal() +
+  labs(title = "Distribution of Brown Module Score across Conditions",
+       x = "Condition",
+       y = "Brown Module Score") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Adjust text angle for better readability if needed
+```
+
+
+```{r}
+# Subset the data for only MEbrown module
+meltedData_brown <- subset(meltedData, Module == "MEbrown")
+
+# Use the updated column names for plotting
+p <- ggplot(meltedData_brown, aes(x = Module, y = EigengeneExpression, fill = sampleTraits)) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(-0.01, 0.01)) +
+  # theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Module", y = "Module Eigengene") +
+  scale_fill_brewer(palette = "Set1")
+
+# Print the plot
+print(p)
+```
+
